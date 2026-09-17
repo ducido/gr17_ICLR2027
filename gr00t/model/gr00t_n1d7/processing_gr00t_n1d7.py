@@ -126,7 +126,8 @@ def build_processor(model_name: str, transformers_loading_kwargs: dict) -> Qwen3
             "Qwen3VLProcessor is not available. "
             "Please upgrade transformers: pip install transformers>=4.52.0"
         )
-    return Qwen3VLProcessor.from_pretrained(model_name, **transformers_loading_kwargs)
+    model_name = '/projects/extern/kisski/kisski-spath/dir.project/VLA_Imit/gr17_ICLR2027/CP/Cosmos-Reason2-2B'
+    return Qwen3VLProcessor.from_pretrained(model_name, **transformers_loading_kwargs, local_files_only=True)
 
 
 def validate_action_horizons(modality_configs, max_action_horizon: int) -> None:
