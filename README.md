@@ -12,6 +12,13 @@ uv pip install --no-build-isolation -e grounding_dino
 cd ..
 ```
 
+# Download some pretrained weights
+Note: Some of the checkpoints cannot be downloaded directly, you may need to download them manually from the links provided in the script.
+```
+# read this file first before running it
+bash scripts/download_pretrained_weights.sh
+```
+
 
 
 # 🧪 Debug (optional)
