@@ -278,42 +278,42 @@ def main(args: ArgsConfig):
             }
 
 
-        # with PolicyServer(policy=policy, host=args.host, port=args.port) as server:
-        #     try:
-        #         server.run()
-        #     except KeyboardInterrupt:
-        #         print("\nShutting down server...")
+        with PolicyServer(policy=policy, host=args.host, port=args.port) as server:
+            try:
+                server.run()
+            except KeyboardInterrupt:
+                print("\nShutting down server...")
 
 
-        import numpy as np
+        # import numpy as np
 
-        front_frame = np.random.randint(0, 256, (1, 480, 640, 3), dtype=np.uint8)
-        wrist_frame = np.random.randint(0, 256, (1, 480, 640, 3), dtype=np.uint8)
-        joints = np.random.uniform(-np.pi, np.pi, (1,6,)).astype(np.float32)
-        gripper = np.random.uniform(0.0, 1.0, (1,1,)).astype(np.float32)
-        instruction = "Use the right gripper to pick up the banana and place it into the pot. Then pick up the lid with the right gripper and place it on top of the pot to close it."
-
-
-        obs = {
-            "video": {
-                "front": front_frame[None, ...],    # (1, 480, 640, 3) uint8, RGB — overhead cam
-                "wrist": wrist_frame[None, ...],    # (1, 480, 640, 3) uint8, RGB — right wrist cam
-            },
-            "state": {
-                "single_arm": joints[None, :],      # (1, 6) float — right arm joint positions, radians
-                "gripper": gripper[None, :],        # (1, 1) float — gripper joint position
-            },
-            "language": {
-                "annotation.human.task_description": [[instruction]]
-            }
-        }
+        # front_frame = np.random.randint(0, 256, (1, 480, 640, 3), dtype=np.uint8)
+        # wrist_frame = np.random.randint(0, 256, (1, 480, 640, 3), dtype=np.uint8)
+        # joints = np.random.uniform(-np.pi, np.pi, (1,6,)).astype(np.float32)
+        # gripper = np.random.uniform(0.0, 1.0, (1,1,)).astype(np.float32)
+        # instruction = "Use the right gripper to pick up the banana and place it into the pot. Then pick up the lid with the right gripper and place it on top of the pot to close it."
 
 
-        action, info = policy._get_action(obs)
+        # obs = {
+        #     "video": {
+        #         "front": front_frame[None, ...],    # (1, 480, 640, 3) uint8, RGB — overhead cam
+        #         "wrist": wrist_frame[None, ...],    # (1, 480, 640, 3) uint8, RGB — right wrist cam
+        #     },
+        #     "state": {
+        #         "single_arm": joints[None, :],      # (1, 6) float — right arm joint positions, radians
+        #         "gripper": gripper[None, :],        # (1, 1) float — gripper joint position
+        #     },
+        #     "language": {
+        #         "annotation.human.task_description": [[instruction]]
+        #     }
+        # }
 
-        for key, value in action.items():
-            print(f"Action: {key}: {value.shape}")
-            print(np.sum(value))
+
+        # action, info = policy._get_action(obs)
+
+        # for key, value in action.items():
+        #     print(f"Action: {key}: {value.shape}")
+        #     print(np.sum(value))
         
 
 

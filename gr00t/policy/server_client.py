@@ -283,7 +283,7 @@ class PolicyClient(BasePolicy):
         self,
         host: str = "localhost",
         port: int = 5555,
-        timeout_ms: int = 15000,
+        timeout_ms: int = 30000,
         api_token: str = None,
         strict: bool = False,
     ):
