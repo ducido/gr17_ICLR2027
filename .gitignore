@@ -171,3 +171,7 @@ offline_open_loop_eval_plots/
 CP/
 pretrained/
 debug_images
+
+# Vendored sim-benchmark source (e.g. LIBERO-plus), cloned by setup scripts
+/external_dependencies/
+eval_logs/

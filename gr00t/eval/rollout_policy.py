@@ -133,6 +133,18 @@ def get_libero_env_fn(
     return env_fn
 
 
+def get_libero_plus_env_fn(
+    env_name: str,
+):
+    def env_fn():
+        from gr00t.eval.sim.LIBERO_plus.libero_plus_env import register_libero_plus_envs
+
+        register_libero_plus_envs()
+        return gym.make(env_name)
+
+    return env_fn
+
+
 def get_robocasa_env_fn(
     env_name: str,
     robocasa_split: str = "",
@@ -164,6 +176,12 @@ def get_gym_env(env_name: str, env_idx: int, total_n_envs: int, robocasa_split: 
 
     elif env_embodiment in (EmbodimentTag.SIMPLER_ENV_GOOGLE, EmbodimentTag.SIMPLER_ENV_WIDOWX):
         env_fn = get_simpler_env_fn(env_name)
+
+    # LIBERO and LIBERO-plus share EmbodimentTag.LIBERO_PANDA (same Panda robot/
+    # action space), so the prefix -- not the embodiment tag -- decides which
+    # register_libero*_envs() gets called; check the more specific prefix first.
+    elif env_prefix == "libero_plus_sim":
+        env_fn = get_libero_plus_env_fn(env_name)
 
     elif env_embodiment in (EmbodimentTag.LIBERO_PANDA,):
         env_fn = get_libero_env_fn(env_name)
