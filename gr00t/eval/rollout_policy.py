@@ -198,6 +198,7 @@ def create_eval_env(
     total_n_envs: int,
     wrapper_configs: WrapperConfigs,
     robocasa_split: str = "",
+    video_dir_override: Path | None = None,
 ) -> gym.Env:
     """Create a single evaluation environment with wrappers.
 
@@ -205,12 +206,18 @@ def create_eval_env(
         env_name: Name of the gymnasium environment to use
         idx: Environment index (used to determine video recording)
         wrapper_configs: Configuration for environment wrappers
+        video_dir_override: When set, used instead of
+            ``wrapper_configs.video.video_dir`` for this env only. Lets a
+            heterogeneous batch (see :func:`run_rollout_gymnasium_policy_batch`)
+            route each sub-env's videos to its own task-specific directory
+            while sharing one ``wrapper_configs`` for everything else.
     Returns:
         Wrapped gymnasium environment
     """
 
     env = get_gym_env(env_name, env_idx, total_n_envs, robocasa_split=robocasa_split)
-    if wrapper_configs.video.video_dir is not None:
+    video_dir = video_dir_override if video_dir_override is not None else wrapper_configs.video.video_dir
+    if video_dir is not None:
         from gr00t.eval.sim.wrapper.video_recording_wrapper import VideoRecordingWrapper
 
         record_video_keys = wrapper_configs.video.record_video_keys
@@ -220,7 +227,7 @@ def create_eval_env(
 
         env = VideoRecordingWrapper(
             env,
-            video_dir=Path(wrapper_configs.video.video_dir),
+            video_dir=Path(video_dir),
             steps_per_render=wrapper_configs.video.steps_per_render,
             max_episode_steps=wrapper_configs.video.max_episode_steps,
             fps=wrapper_configs.video.fps,
@@ -294,6 +301,23 @@ def _macro_step_env_steps(env_infos: dict, env_idx: int) -> int:
         if n_env_steps is not None:
             return int(n_env_steps)
     return 0
+
+
+def _normalize_success(env_success: Any) -> bool:
+    """Coerce an env's ``success`` value (bool / int / list / ndarray of
+    per-condition flags) to a single bool, matching each success type the sim
+    benchmarks are known to emit. Raises on an unrecognized type so a new
+    benchmark's novel success shape fails loudly here instead of silently
+    miscounting successes.
+    """
+    if isinstance(env_success, list):
+        return bool(np.any(env_success))
+    elif isinstance(env_success, np.ndarray):
+        return bool(np.any(env_success))
+    elif isinstance(env_success, (bool, int)):
+        return bool(env_success)
+    else:
+        raise ValueError(f"Unknown success dtype: {type(env_success)}")
 
 
 def _collect_rollout_episodes(
@@ -415,6 +439,151 @@ def _collect_rollout_episodes(
         pbar.close()
 
     return episode_successes, episode_lengths, episode_rewards, episode_infos
+
+
+def _collect_one_episode_per_env(
+    env,
+    policy: BasePolicy,
+    n_envs: int,
+    seed: int | None,
+):
+    """Like :func:`_collect_rollout_episodes`, but for a *heterogeneous* batch
+    where each sub-env is a different task and exactly one episode per sub-env
+    is wanted (see :func:`run_rollout_gymnasium_policy_batch`).
+
+    Unlike the shared-task loop, completion is tracked per sub-env index
+    rather than by a single ``n_episodes`` counter, and results are returned
+    positionally (index i == the i-th sub-env), not in completion order.
+    Sub-envs that finish early keep auto-resetting and stepping (gymnasium
+    vector envs step all sub-envs together; there's no way to pause one), but
+    any episode after a sub-env's first is discarded -- this wastes some
+    compute on early finishers but keeps the vectorized stepping simple and
+    correct: exactly one recorded result per sub-env.
+    """
+    episode_lengths: list[int | None] = [None] * n_envs
+    episode_rewards: list[float | None] = [None] * n_envs
+    episode_successes: list[bool | None] = [None] * n_envs
+    current_rewards = [0.0] * n_envs
+    current_lengths = [0] * n_envs
+    current_successes = [False] * n_envs
+    contributed = [False] * n_envs
+
+    if seed is not None:
+        reset_seeds = [int(seed) + i for i in range(n_envs)]
+        observations, _ = env.reset(seed=reset_seeds)
+    else:
+        observations, _ = env.reset()
+    policy.reset()
+
+    pbar = tqdm(total=n_envs, desc="Tasks")
+    try:
+        while not all(contributed):
+            actions, _ = policy.get_action(observations)
+            next_obs, rewards, terminations, truncations, env_infos = env.step(actions)
+            for env_idx in range(n_envs):
+                if contributed[env_idx]:
+                    continue
+
+                if "success" in env_infos:
+                    current_successes[env_idx] |= _normalize_success(env_infos["success"][env_idx])
+                else:
+                    current_successes[env_idx] = False
+
+                if "final_info" in env_infos and env_infos["final_info"][env_idx] is not None:
+                    current_successes[env_idx] |= _normalize_success(
+                        env_infos["final_info"][env_idx]["success"]
+                    )
+
+                current_rewards[env_idx] += rewards[env_idx]
+                current_lengths[env_idx] += _macro_step_env_steps(env_infos, env_idx)
+
+                if terminations[env_idx] or truncations[env_idx]:
+                    episode_lengths[env_idx] = current_lengths[env_idx]
+                    episode_rewards[env_idx] = float(current_rewards[env_idx])
+                    episode_successes[env_idx] = current_successes[env_idx]
+                    contributed[env_idx] = True
+                    pbar.update(1)
+            observations = next_obs
+
+        try:
+            env.reset()
+        except Exception as reset_err:
+            print(f"Final env.reset() before close failed; closing env anyway: {reset_err}")
+    finally:
+        pbar.close()
+
+    return episode_successes, episode_lengths, episode_rewards
+
+
+def run_rollout_gymnasium_policy_batch(
+    env_names: list[str],
+    policy: BasePolicy,
+    wrapper_configs: WrapperConfigs,
+    video_dirs: list[str | None] | None = None,
+    seed: int | None = None,
+) -> Any:
+    """Run exactly one episode for each of ``len(env_names)`` *different*
+    tasks in a single vectorized env, so every macro-step sends ONE batched
+    request to the (possibly remote) policy -- one GPU forward pass covers
+    the whole batch, unlike calling :func:`run_rollout_gymnasium_policy` once
+    per task in a loop (which is what the naive per-task sweep does).
+
+    All tasks in a batch must share the same embodiment (e.g. every
+    ``libero_plus_sim/...`` task shares ``EmbodimentTag.LIBERO_PANDA``) since
+    they're served by the same policy instance.
+
+    Args:
+        env_names: One gym env_name per sub-env; determines batch size.
+        video_dirs: Optional per-task video directory, positionally aligned
+            with ``env_names`` (``None`` entries disable video for that task).
+            Overrides ``wrapper_configs.video.video_dir``.
+    Returns:
+        ``(env_names, episode_successes, episode_infos)``, positionally
+        aligned with ``env_names`` (index i is env_names[i]'s result) --
+        unlike :func:`run_rollout_gymnasium_policy`, which returns results in
+        completion order because multiple sub-envs there share one task.
+    """
+    n_envs = len(env_names)
+    if video_dirs is not None and len(video_dirs) != n_envs:
+        raise ValueError(f"video_dirs has {len(video_dirs)} entries, expected {n_envs}")
+
+    start_time = time.time()
+    print(f"Running 1 episode each for {n_envs} tasks in one batch")
+
+    env_fns = [
+        partial(
+            create_eval_env,
+            env_idx=idx,
+            env_name=env_names[idx],
+            total_n_envs=n_envs,
+            wrapper_configs=wrapper_configs,
+            video_dir_override=(video_dirs[idx] if video_dirs is not None else None),
+        )
+        for idx in range(n_envs)
+    ]
+
+    if n_envs == 1:
+        env = gym.vector.SyncVectorEnv(env_fns)
+    else:
+        env = _RobustAsyncVectorEnv(env_fns, shared_memory=False, context="spawn")
+
+    try:
+        episode_successes, episode_lengths, episode_rewards = _collect_one_episode_per_env(
+            env, policy, n_envs, seed
+        )
+    finally:
+        try:
+            env.close()
+        except Exception as close_err:
+            print(f"env.close() during teardown failed: {close_err}")
+
+    print(f"Batch of {n_envs} tasks took {time.time() - start_time:.1f}s")
+
+    episode_infos = {
+        "episode_lengths": episode_lengths,
+        "episode_rewards": episode_rewards,
+    }
+    return env_names, episode_successes, episode_infos
 
 
 def run_rollout_gymnasium_policy(
@@ -637,6 +806,59 @@ def run_gr00t_sim_policy(
         )
         print("Video saved to: ", wrapper_configs.video.video_dir)
         return results
+
+
+def run_gr00t_sim_policy_batch(
+    env_names: list[str],
+    max_episode_steps: int,
+    model_path: str = "",
+    policy_client_host: str = "",
+    policy_client_port: int | None = None,
+    n_action_steps: int = 8,
+    video_dirs: list[str | None] | None = None,
+    seed: int | None = None,
+):
+    """Batched counterpart of :func:`run_gr00t_sim_policy`: one episode each
+    for every task in ``env_names``, sent to the policy as one vectorized
+    batch per macro-step instead of one ``run_gr00t_sim_policy`` process per
+    task. All tasks must share one embodiment (checked below), since they're
+    served by the same policy instance -- true for a LIBERO-plus sweep, where
+    every task uses ``EmbodimentTag.LIBERO_PANDA``.
+    """
+    seed = seed_everything(seed)
+
+    embodiment_tags = {get_embodiment_tag_from_env_name(name) for name in env_names}
+    if len(embodiment_tags) != 1:
+        raise ValueError(
+            f"run_gr00t_sim_policy_batch requires all tasks to share one embodiment "
+            f"(one policy instance serves the whole batch); got {embodiment_tags}"
+        )
+    embodiment_tag = embodiment_tags.pop()
+
+    policy = create_gr00t_sim_policy(
+        model_path,
+        embodiment_tag,
+        policy_client_host,
+        policy_client_port,
+    )
+
+    contract = PolicyHorizonSpec.from_policy(policy, n_action_steps=n_action_steps)
+    wrapper_configs = WrapperConfigs(
+        multistep=MultiStepConfig(
+            contract=contract,
+            max_episode_steps=max_episode_steps,
+            terminate_on_success=True,
+        ),
+        video=VideoConfig(max_episode_steps=max_episode_steps),
+    )
+
+    return run_rollout_gymnasium_policy_batch(
+        env_names=env_names,
+        policy=policy,
+        wrapper_configs=wrapper_configs,
+        video_dirs=video_dirs,
+        seed=seed,
+    )
 
 
 @dataclass

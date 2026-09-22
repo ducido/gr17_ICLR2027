@@ -117,10 +117,48 @@ under `libero_plus_sim/` for completeness but `list_tasks.py` won't return them 
 
 # Running a full perturbation-category sweep
 
-`scripts/libero_plus.sh <suite> <pertube> <port>` runs every task in one suite/category against an
-already-running server (Terminal 1 above), writing per-task logs and videos under `eval_logs/libero_plus/`:
+`scripts/libero_plus.sh <suite> <pertube> <port> [batch_size]` runs every task in one
+suite/category against an already-running server (Terminal 1 above), writing per-task logs and
+videos under `eval_logs/libero_plus/`:
 ```bash
 bash scripts/libero_plus.sh libero_10 noise 5555
 ```
 `pertube` is one of: `background`, `camera_view`, `language`, `layout`, `light`, `noise`,
 `robot_init_state` (mapped to the 7 categories above).
+
+**Why this is batched, not one process per task:** `gr00t.policy.server_client.PolicyServer` is a
+single-threaded, blocking ZeroMQ loop (one request in flight at a time) -- running more client
+processes against one server would only serialize behind each other, not parallelize. The actual
+lever is batch size: `gr00t/eval/sim/LIBERO_plus/rollout_batch.py` (which the sweep script calls
+once for the whole task list, rather than looping `rollout_policy.py` per task) vectorizes
+`batch_size` *different* tasks per macro-step into one request, so one server-side GPU forward pass
+covers the whole batch -- the same mechanism `rollout_policy.py --n-envs` uses to batch multiple
+episodes of one task, generalized to batch multiple different tasks (what a sweep of ~2,500
+single-episode task variants actually needs). Tune the 4th argument to fit your GPU/CPU:
+```bash
+bash scripts/libero_plus.sh libero_10 noise 5555 16   # 16 tasks per batch instead of the default 8
+```
+
+To sweep all 7 perturbation categories for a suite in one go, use
+`scripts/libero_plus_all_pertubation.sh <suite> <port> [batch_size]`, which just loops
+`scripts/libero_plus.sh` over every category:
+```bash
+bash scripts/libero_plus_all_pertubation.sh libero_10 5555
+```
+
+# Checking results across suites and perturbations
+
+Each sweep run (one `scripts/libero_plus.sh` invocation, i.e. one suite x perturbation) writes, under
+its `eval_logs/libero_plus/<pertube>/<suite>/.../` log root:
+- `results.csv` -- one row per task (`suite,pertube,category,task,success,episode_length,episode_reward`),
+  rewritten fresh each run so re-running a sweep doesn't accumulate stale/duplicate rows.
+- `summary.json` -- that run's aggregate (`n_tasks`, `n_success`, `success_rate`).
+- `<task_basename>/<task_basename>.txt` and `<task_basename>/videos/` -- unchanged, per-task detail.
+
+To see a suite x perturbation success-rate table across every sweep you've run (no LIBERO/robosuite
+import or venv needed -- plain `python3`):
+```bash
+python3 gr00t/eval/sim/LIBERO_plus/summarize_results.py
+```
+Add `--combine-csv /path/to/all_results.csv` to also concatenate every run's `results.csv` into one
+file (e.g. for a pandas/Excel deep-dive on individual task failures across suites/perturbations).
